@@ -1,0 +1,43 @@
+# ─── Bot-specific ───────────────────────────────────
+.env
+state/
+*.pickle
+*.log
+
+# ─── Python ─────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Type checkers
+.pyre/
+.pytype/

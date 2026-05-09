@@ -1,0 +1,46 @@
+[Unit]
+Description=Telegram Scraper Bot
+Documentation=https://github.com/poli0981/telegram-scraper-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kokone
+Group=kokone
+
+# Adjust this to wherever you cloned the repo
+WorkingDirectory=/home/kokone/telegram-scraper-bot
+
+# Load env from .env file in repo root
+EnvironmentFile=/home/kokone/telegram-scraper-bot/.env
+
+# Use venv-installed python so deps are isolated
+ExecStart=/home/kokone/telegram-scraper-bot/.venv/bin/python -m bot.main
+
+# Restart on crash, but back off if it crashes too fast
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Sandboxing
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/kokone/telegram-scraper-bot/state
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+
+# Logging: journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-scraper-bot
+
+[Install]
+WantedBy=multi-user.target

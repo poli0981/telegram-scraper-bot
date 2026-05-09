@@ -1,0 +1,21 @@
+services:
+  bot:
+    build: .
+    image: telegram-scraper-bot:latest
+    container_name: telegram-scraper-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./state:/app/state
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Bot only makes outbound calls (Telegram + GitHub) — no port exposure
+    networks:
+      - default
+
+networks:
+  default:
+    driver: bridge
