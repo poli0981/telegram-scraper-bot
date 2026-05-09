@@ -10,9 +10,26 @@ Reference:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
+
+# Redact patterns for tokens that might appear in error bodies. Belt-and-braces:
+# GitHub never echoes the auth header back, but a misconfigured proxy could.
+_TOKEN_PATTERNS = [
+    re.compile(r"gh[ops]_[A-Za-z0-9_]{20,}"),  # GitHub PAT (classic + fine-grained)
+    re.compile(r"github_pat_[A-Za-z0-9_]{40,}"),  # fine-grained PAT explicit prefix
+    re.compile(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b"),  # Telegram bot token shape
+]
+
+
+def _redact(text: str) -> str:
+    """Strip anything that looks like a token before logging."""
+    for pat in _TOKEN_PATTERNS:
+        text = pat.sub("***REDACTED***", text)
+    return text
+
 
 log = logging.getLogger(__name__)
 
@@ -79,9 +96,7 @@ class Dispatcher:
             On transport failure, ok=False and error is populated.
         """
         if not links:
-            return DispatchResult(
-                ok=False, repo=repo, status_code=0, error="no links to dispatch"
-            )
+            return DispatchResult(ok=False, repo=repo, status_code=0, error="no links to dispatch")
 
         joined = "\n".join(links)
         if len(joined) > _LINKS_INPUT_MAX_CHARS:
@@ -126,8 +141,8 @@ class Dispatcher:
             log.info("dispatch: ok repo=%s", repo)
             return DispatchResult(ok=True, repo=repo, status_code=resp.status_code)
 
-        # Truncate response body for log/error message
-        body = resp.text[:300] if resp.text else "<empty>"
+        # Truncate response body for log/error message; redact token-shaped strings
+        body = _redact(resp.text[:300]) if resp.text else "<empty>"
         log.warning("dispatch: failed repo=%s status=%d body=%s", repo, resp.status_code, body)
         return DispatchResult(
             ok=False,

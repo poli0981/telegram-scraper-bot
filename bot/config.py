@@ -39,6 +39,8 @@ class Config:
     rate_limit_global_window: int = 3600
     max_links_per_dispatch: int = 100
     log_level: str = "INFO"
+    log_format: str = "text"  # "text" or "json"
+    git_sha: str = "dev"  # injected at Docker build via ARG GIT_SHA
 
     @classmethod
     def load(cls, env_file: str | os.PathLike | None = ".env") -> Config:
@@ -75,15 +77,26 @@ class Config:
             rate_limit_global_window=_int_env("RATE_LIMIT_GLOBAL_WINDOW", 3600),
             max_links_per_dispatch=_int_env("MAX_LINKS_PER_DISPATCH", 100),
             log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+            log_format=os.environ.get("LOG_FORMAT", "text").lower(),
+            git_sha=os.environ.get("BOT_GIT_SHA", "dev"),
         )
 
     def setup_logging(self) -> None:
         """Configure root logger. Idempotent."""
-        logging.basicConfig(
-            level=self.log_level,
-            format="%(asctime)s %(levelname)-8s %(name)s :: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+        if self.log_format == "json":
+            handler = logging.StreamHandler()
+            handler.setFormatter(_make_json_formatter())
+            root = logging.getLogger()
+            root.handlers.clear()
+            root.addHandler(handler)
+            root.setLevel(self.log_level)
+        else:
+            logging.basicConfig(
+                level=self.log_level,
+                format="%(asctime)s %(levelname)-8s %(name)s :: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+                force=True,
+            )
         # PTB is chatty at DEBUG; quiet it unless we explicitly want it
         if self.log_level != "DEBUG":
             logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -92,6 +105,26 @@ class Config:
 
 
 # ─── helpers ────────────────────────────────────────────────────
+
+
+def _make_json_formatter() -> logging.Formatter:
+    """Build a JSON log formatter, falling back to text if dependency missing.
+
+    python-json-logger is in requirements.txt; if it's missing (e.g. dev install
+    skipped), we degrade to plain text rather than crash.
+    """
+    try:
+        from pythonjsonlogger.jsonlogger import JsonFormatter
+
+        return JsonFormatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+    except ImportError:
+        return logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s :: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
 
 
 def _required(name: str) -> str:

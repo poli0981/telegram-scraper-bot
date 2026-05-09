@@ -108,17 +108,13 @@ class RateLimit:
             self._prune(user_dq, t - self.user_window)
             if len(user_dq) >= self.user_max:
                 retry_after = max(0.0, user_dq[0] + self.user_window - t)
-                return RateLimitDecision(
-                    allowed=False, reason="user", retry_after=retry_after
-                )
+                return RateLimitDecision(allowed=False, reason="user", retry_after=retry_after)
 
         # Global window
         self._prune(self._global, t - self.global_window)
         if len(self._global) >= self.global_max:
             retry_after = max(0.0, self._global[0] + self.global_window - t)
-            return RateLimitDecision(
-                allowed=False, reason="global", retry_after=retry_after
-            )
+            return RateLimitDecision(allowed=False, reason="global", retry_after=retry_after)
 
         return RateLimitDecision(allowed=True)
 
@@ -129,11 +125,56 @@ class RateLimit:
         user_dq.append(t)
         self._global.append(t)
 
+    def remaining(self, user_id: int, *, now: float | None = None) -> RateLimitRemaining:
+        """Snapshot of how many dispatches the user has left in each window.
+
+        Read-only — does not record. Used by /status to surface quota to the user.
+        """
+        t = now if now is not None else time.monotonic()
+
+        user_dq = self._per_user.get(user_id)
+        if user_dq is not None:
+            self._prune(user_dq, t - self.user_window)
+            user_used = len(user_dq)
+            user_reset = max(0.0, user_dq[0] + self.user_window - t) if user_dq else 0.0
+        else:
+            user_used = 0
+            user_reset = 0.0
+
+        self._prune(self._global, t - self.global_window)
+        global_used = len(self._global)
+        global_reset = max(0.0, self._global[0] + self.global_window - t) if self._global else 0.0
+
+        return RateLimitRemaining(
+            user_used=user_used,
+            user_max=self.user_max,
+            user_window=self.user_window,
+            user_reset_in=user_reset,
+            global_used=global_used,
+            global_max=self.global_max,
+            global_window=self.global_window,
+            global_reset_in=global_reset,
+        )
+
     @staticmethod
     def _prune(dq: deque[float], cutoff: float) -> None:
         """Drop entries older than cutoff. In-place."""
         while dq and dq[0] < cutoff:
             dq.popleft()
+
+
+@dataclass(slots=True, frozen=True)
+class RateLimitRemaining:
+    """Snapshot of remaining quota for one user + the global pool."""
+
+    user_used: int
+    user_max: int
+    user_window: float
+    user_reset_in: float  # seconds until oldest user entry ages out (0 if empty)
+    global_used: int
+    global_max: int
+    global_window: float
+    global_reset_in: float
 
 
 # ─── Helpers ────────────────────────────────────────────────────

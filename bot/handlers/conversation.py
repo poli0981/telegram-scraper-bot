@@ -13,11 +13,16 @@ from __future__ import annotations
 
 import logging
 from enum import IntEnum
-from typing import TYPE_CHECKING
 
-from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardRemove,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -37,15 +42,12 @@ from bot.file_parser import (
     UnsupportedFileError,
     parse_uploaded_file,
 )
-from bot.gates import ConcurrencyLock, RateLimit, format_retry_after
+from bot.gates import ConcurrencyLock
+from bot.handlers.dispatch_flow import gated_dispatch
 from bot.preview import (
     format_collect_progress,
     format_preview,
 )
-
-if TYPE_CHECKING:
-    from bot.dispatcher import Dispatcher
-
 
 log = logging.getLogger(__name__)
 
@@ -56,11 +58,39 @@ class State(IntEnum):
     CONFIRM = 2
 
 
-# Keyboards
-_MODE_KEYBOARD = ReplyKeyboardMarkup(
-    [["/steam", "/itch"], ["/mixed", "/cancel"]],
-    resize_keyboard=True,
-    one_time_keyboard=True,
+# How many lines /show prints before truncating with "and N more"
+_BUFFER_SHOW_LIMIT = 10
+
+
+def _escape_buffer_line(line: str) -> str:
+    """Escape backslash and backticks for safe inclusion in a Markdown code span."""
+    return line.replace("\\", "\\\\").replace("`", "'")
+
+
+# Inline keyboard for the mode picker. callback_data routes to bot.handlers.callbacks.mode_callback.
+_MODE_KEYBOARD = InlineKeyboardMarkup(
+    [
+        [
+            InlineKeyboardButton("Steam", callback_data="mode:steam"),
+            InlineKeyboardButton("itch", callback_data="mode:itch"),
+        ],
+        [
+            InlineKeyboardButton("Mixed", callback_data="mode:mixed"),
+            InlineKeyboardButton("Cancel", callback_data="mode:cancel"),
+        ],
+    ]
+)
+
+
+# Inline keyboard for the CONFIRM-state preview message.
+_CONFIRM_KEYBOARD = InlineKeyboardMarkup(
+    [
+        [
+            InlineKeyboardButton("✅ Confirm", callback_data="confirm:yes"),
+            InlineKeyboardButton("✏️ Edit", callback_data="confirm:edit"),
+            InlineKeyboardButton("❌ Cancel", callback_data="confirm:cancel"),
+        ]
+    ]
 )
 
 
@@ -88,7 +118,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 @auth
 async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User picked a mode. Save it, advance to COLLECT."""
+    """Slash-command mode picker (parallel to the inline button mode_callback).
+
+    Kept so power users can type ``/steam`` directly without tapping a button.
+    """
     if not update.message or not update.message.text:
         return State.CHOOSE
 
@@ -106,9 +139,8 @@ async def choose_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         f"Paste links (1 per line, max *{config.max_links_per_dispatch}*).\n"
         f"You can send multiple messages, or upload a `.txt` / `.json` file.\n"
         f"When done, send /done.\n\n"
-        f"Or /cancel to abort.",
+        f"/show — peek at buffer · /reset — clear buffer · /cancel — abort.",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=ReplyKeyboardRemove(),
     )
     return State.COLLECT
 
@@ -155,8 +187,9 @@ async def collect_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         data = await tg_file.download_as_bytearray()
     except Exception as e:  # noqa: BLE001 — Telegram errors are varied
         log.warning("collect_file: download failed: %s", e)
-        await update.message.reply_text(f"❌ Failed to download `{filename}`.",
-                                         parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"❌ Failed to download `{filename}`.", parse_mode=ParseMode.MARKDOWN
+        )
         return State.COLLECT
 
     # Parse
@@ -166,13 +199,13 @@ async def collect_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         await update.message.reply_text(f"❌ {e}")
         return State.COLLECT
     except UnsupportedFileError as e:
-        await update.message.reply_text(f"❌ Failed to parse `{filename}`: {e}",
-                                         parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            f"❌ Failed to parse `{filename}`: {e}", parse_mode=ParseMode.MARKDOWN
+        )
         return State.COLLECT
 
     if not new_lines:
-        await update.message.reply_text(f"⚠ `{filename}` is empty.",
-                                         parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"⚠ `{filename}` is empty.", parse_mode=ParseMode.MARKDOWN)
         return State.COLLECT
 
     await _extend_buffer(update, context, new_lines)
@@ -207,6 +240,49 @@ async def _extend_buffer(
         msg += f"\n\n⚠ {overflow} line(s) dropped (over limit)."
 
     await update.message.reply_text(msg)
+
+
+@auth
+async def reset_buffer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Clear the buffer mid-COLLECT without ending the conversation."""
+    if not update.message:
+        return State.COLLECT
+    context.user_data["buffer"] = []
+    await update.message.reply_text("📥 Buffer cleared. Paste new links or /cancel to abort.")
+    return State.COLLECT
+
+
+@auth
+async def show_buffer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Echo the current buffer content for inspection."""
+    if not update.message:
+        return State.COLLECT
+
+    buffer: list[str] = context.user_data.get("buffer", [])
+    config = context.bot_data["config"]
+
+    if not buffer:
+        await update.message.reply_text("📥 Buffer is empty. Paste links or /cancel.")
+        return State.COLLECT
+
+    sample = buffer[:_BUFFER_SHOW_LIMIT]
+    sample_lines = []
+    for line in sample:
+        truncated = line if len(line) <= 60 else line[:59] + "…"
+        sample_lines.append(f"  • `{_escape_buffer_line(truncated)}`")
+
+    overflow = len(buffer) - len(sample)
+    msg_lines = [
+        f"📥 *{len(buffer)}*/{config.max_links_per_dispatch} buffered:",
+        *sample_lines,
+    ]
+    if overflow > 0:
+        msg_lines.append(f"  … and {overflow} more")
+    msg_lines.append("")
+    msg_lines.append("Send more, /reset to clear, /done to preview.")
+
+    await update.message.reply_text("\n".join(msg_lines), parse_mode=ParseMode.MARKDOWN)
+    return State.COLLECT
 
 
 @auth
@@ -249,78 +325,29 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "invalid_count": len(invalid),
     }
 
-    preview_text = format_preview(steam, itch, invalid, mode)
-    await update.message.reply_text(preview_text, parse_mode=ParseMode.MARKDOWN)
+    has_valid = bool(steam or itch)
+    preview_text = format_preview(steam, itch, invalid, mode, inline=has_valid)
 
-    if not steam and not itch:
+    if not has_valid:
+        await update.message.reply_text(preview_text, parse_mode=ParseMode.MARKDOWN)
         # No valid links — return to CHOOSE so user can retry without /start
         context.user_data.clear()
         return ConversationHandler.END
 
+    await update.message.reply_text(
+        preview_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=_CONFIRM_KEYBOARD,
+    )
     return State.CONFIRM
 
 
 # ─── CONFIRM state ──────────────────────────────────────────────
 
 
-async def _dispatch_one_platform(
-    *,
-    platform: str,
-    repo: str,
-    links: list[str],
-    chat_id: int,
-    bot,
-    dispatcher: Dispatcher,
-) -> None:
-    """Send a placeholder message and dispatch one platform's workflow.
-
-    Posts `⏳ {platform}: dispatching N links...` first, then calls the
-    dispatcher with that message's ID. On dispatch failure, edits the
-    placeholder with the error so the user sees it immediately rather than
-    waiting for a workflow that never started.
-
-    On success, leaves the placeholder alone — the running workflow will
-    `editMessageText` it with the final result in 1–8 minutes.
-    """
-    placeholder = await bot.send_message(
-        chat_id=chat_id,
-        text=f"⏳ *{platform}*: dispatching {len(links)} link(s)...",
-        parse_mode=ParseMode.MARKDOWN,
-    )
-
-    result = await dispatcher.dispatch(
-        repo=repo,
-        links=links,
-        chat_id=chat_id,
-        message_id=placeholder.message_id,
-    )
-
-    if result.ok:
-        log.info("dispatch %s ok: repo=%s links=%d msg=%d",
-                 platform, repo, len(links), placeholder.message_id)
-        return
-
-    log.warning("dispatch %s failed: repo=%s status=%d err=%s",
-                platform, repo, result.status_code, result.error)
-    error_text = (
-        f"❌ *{platform}*: dispatch failed\n"
-        f"`HTTP {result.status_code}`\n"
-        f"`{result.error or 'unknown error'}`"
-    )
-    try:
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=placeholder.message_id,
-            text=error_text,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    except Exception as e:  # pragma: no cover — defensive
-        log.warning("edit_message_text after dispatch failure failed: %s", e)
-
-
 @auth
 async def confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Dispatch to GitHub Actions — separate placeholder per platform.
+    """Dispatch to GitHub Actions via the shared gated_dispatch helper.
 
     Protected by two gates:
       1. ConcurrencyLock: at most one in-flight dispatch per user.
@@ -334,63 +361,19 @@ async def confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("No preview to confirm. /start to retry.")
         return ConversationHandler.END
 
-    config = context.bot_data["config"]
-    dispatcher: Dispatcher = context.bot_data["dispatcher"]
-    lock: ConcurrencyLock = context.bot_data["lock"]
-    rate_limit: RateLimit = context.bot_data["rate_limit"]
-
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
-    # Gate 1: rate limit (cheap check, fail fast)
-    decision = rate_limit.check(user_id)
-    if not decision.allowed:
-        scope = "your" if decision.reason == "user" else "global"
-        await update.message.reply_text(
-            f"⏳ Rate limit reached ({scope}). Try again in {format_retry_after(decision.retry_after)}."
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    # Gate 2: concurrency lock
-    if not lock.try_acquire(user_id):
-        await update.message.reply_text(
-            "⏳ You already have a dispatch in flight. Wait for it to finish "
-            "(or up to 10 min for stale locks)."
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    # Both gates passed — dispatch under try/finally so lock is always released
-    try:
-        steam: list[str] = preview["steam"]
-        itch: list[str] = preview["itch"]
-        chat_id = update.effective_chat.id
-
-        if steam:
-            await _dispatch_one_platform(
-                platform="Steam",
-                repo=config.steam_repo,
-                links=steam,
-                chat_id=chat_id,
-                bot=context.bot,
-                dispatcher=dispatcher,
-            )
-
-        if itch:
-            await _dispatch_one_platform(
-                platform="itch",
-                repo=config.itch_repo,
-                links=itch,
-                chat_id=chat_id,
-                bot=context.bot,
-                dispatcher=dispatcher,
-            )
-
-        # Record against rate limit only after dispatch completes (success or
-        # transport-level failure both count — they consumed an Actions slot).
-        rate_limit.record(user_id)
-    finally:
-        lock.release(user_id)
+    ok, err = await gated_dispatch(
+        user_id=user_id,
+        chat_id=chat_id,
+        steam=preview["steam"],
+        itch=preview["itch"],
+        bot_data=context.bot_data,
+        bot=context.bot,
+    )
+    if not ok:
+        await update.message.reply_text(err or "Dispatch refused.")
 
     context.user_data.clear()
     return ConversationHandler.END
@@ -401,12 +384,18 @@ async def confirm_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 @auth
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Abort the current conversation."""
+    """Abort the current conversation. Releases the concurrency lock if held.
+
+    Without this lock release, a user who ran /yes (which acquires the lock) and
+    then hit /cancel would still appear "in flight" to gates for up to 10 min.
+    """
+    lock: ConcurrencyLock | None = context.bot_data.get("lock")
+    if lock is not None and update.effective_user is not None:
+        lock.release(update.effective_user.id)
+
     context.user_data.clear()
     if update.message:
-        await update.message.reply_text(
-            "Cancelled.", reply_markup=ReplyKeyboardRemove()
-        )
+        await update.message.reply_text("Cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 
@@ -415,6 +404,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def build_conversation_handler() -> ConversationHandler:
     """Construct the ConversationHandler with all entry/state/fallback handlers."""
+    # Imported here to avoid a circular import at module load (callbacks.py
+    # imports State from this module to map back to the ConversationHandler).
+    from bot.handlers.callbacks import confirm_callback, mode_callback
+
     return ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -424,9 +417,12 @@ def build_conversation_handler() -> ConversationHandler:
             State.CHOOSE: [
                 CommandHandler(["steam", "itch", "mixed"], choose_mode),
                 CommandHandler("cancel", cancel),
+                CallbackQueryHandler(mode_callback, pattern=r"^mode:"),
             ],
             State.COLLECT: [
                 CommandHandler("done", done),
+                CommandHandler("reset", reset_buffer),
+                CommandHandler("show", show_buffer),
                 CommandHandler("cancel", cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, collect),
                 MessageHandler(filters.Document.ALL, collect_file),
@@ -434,6 +430,7 @@ def build_conversation_handler() -> ConversationHandler:
             State.CONFIRM: [
                 CommandHandler("yes", confirm_yes),
                 CommandHandler("cancel", cancel),
+                CallbackQueryHandler(confirm_callback, pattern=r"^confirm:"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

@@ -23,6 +23,8 @@ def format_preview(
     itch: list[str],
     invalid: list[ClassifiedLink],
     mode: str,
+    *,
+    inline: bool = False,
 ) -> str:
     """Build the preview message shown before user confirms /yes.
 
@@ -31,6 +33,8 @@ def format_preview(
         itch: Normalized itch URLs.
         invalid: ClassifiedLink entries with kind=INVALID.
         mode: One of "steam", "itch", "mixed".
+        inline: If True, omit the "Confirm? /yes or /cancel" footer because
+            the caller is attaching inline buttons instead.
     """
     lines = [
         "📋 *Preview*",
@@ -53,11 +57,15 @@ def format_preview(
         if len(invalid) > _MAX_INVALID_SAMPLES:
             lines.append(f"  … and {len(invalid) - _MAX_INVALID_SAMPLES} more")
 
-    lines.append("")
-    if steam or itch:
-        lines.append("Confirm? /yes or /cancel")
-    else:
-        lines.append("⚠ Nothing valid to dispatch. /cancel and try again.")
+    if not inline:
+        lines.append("")
+        if steam or itch:
+            lines.append("Confirm? /yes or /cancel")
+        else:
+            lines.append("⚠ Nothing valid to dispatch. /cancel and try again.")
+    elif not (steam or itch):
+        lines.append("")
+        lines.append("⚠ Nothing valid to dispatch.")
 
     return _truncate("\n".join(lines))
 

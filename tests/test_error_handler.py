@@ -32,9 +32,7 @@ def _make_update_with_message() -> Update:
 
 
 class TestErrorHandler:
-    async def test_logs_traceback(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_logs_traceback(self, caplog: pytest.LogCaptureFixture) -> None:
         try:
             raise ValueError("test exception with unique-token-9c4b")
         except ValueError as e:
@@ -64,9 +62,7 @@ class TestErrorHandler:
         assert "internal detail" not in reply
         assert "RuntimeError" not in reply
 
-    async def test_no_error_in_context_no_op(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_no_error_in_context_no_op(self, caplog: pytest.LogCaptureFixture) -> None:
         ctx = _make_context_with_error(None)  # type: ignore[arg-type]
         update = _make_update_with_message()
 
@@ -75,9 +71,7 @@ class TestErrorHandler:
 
         update.effective_message.reply_text.assert_not_called()
 
-    async def test_handles_non_update_object(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_handles_non_update_object(self, caplog: pytest.LogCaptureFixture) -> None:
         """PTB sometimes passes non-Update objects (e.g. string) for non-update errors."""
         ctx = _make_context_with_error(ValueError("background task error"))
 
@@ -87,9 +81,7 @@ class TestErrorHandler:
 
         assert "background task error" in caplog.text
 
-    async def test_handles_update_without_message(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_handles_update_without_message(self, caplog: pytest.LogCaptureFixture) -> None:
         """An Update can have effective_message=None (e.g. callback queries)."""
         update = Update(update_id=1)  # no message
         ctx = _make_context_with_error(RuntimeError("boom"))
@@ -100,9 +92,7 @@ class TestErrorHandler:
 
         assert "boom" in caplog.text
 
-    async def test_reply_failure_does_not_propagate(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_reply_failure_does_not_propagate(self, caplog: pytest.LogCaptureFixture) -> None:
         """If the reply itself fails (e.g. blocked user), error_handler must swallow."""
         update = _make_update_with_message()
         update.effective_message.reply_text.side_effect = RuntimeError("send failed")

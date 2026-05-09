@@ -37,9 +37,7 @@ class TestFormatPreview:
         assert "garbage2" in text
 
     def test_caps_invalid_samples_at_5(self) -> None:
-        invalid = [
-            ClassifiedLink(LinkKind.INVALID, f"bad{i}", f"bad{i}") for i in range(10)
-        ]
+        invalid = [ClassifiedLink(LinkKind.INVALID, f"bad{i}", f"bad{i}") for i in range(10)]
         text = format_preview(steam=["x"], itch=[], invalid=invalid, mode="steam")
         # First 5 shown, rest summarized
         assert "bad0" in text
@@ -69,9 +67,7 @@ class TestFormatPreview:
 
     def test_message_within_telegram_limit(self) -> None:
         # Even with worst-case input, message must not exceed cap
-        invalid = [
-            ClassifiedLink(LinkKind.INVALID, "x" * 100, "x" * 100) for _ in range(20)
-        ]
+        invalid = [ClassifiedLink(LinkKind.INVALID, "x" * 100, "x" * 100) for _ in range(20)]
         text = format_preview(steam=["a"] * 50, itch=["b"] * 50, invalid=invalid, mode="mixed")
         assert len(text) <= _MESSAGE_MAX_CHARS
 
@@ -81,24 +77,18 @@ class TestFormatPreview:
 
 class TestFormatDispatchSummary:
     def test_steam_only_success(self) -> None:
-        text = format_dispatch_summary(
-            steam_count=5, itch_count=0, steam_ok=True, itch_ok=None
-        )
+        text = format_dispatch_summary(steam_count=5, itch_count=0, steam_ok=True, itch_ok=None)
         assert "✅ Steam" in text
         assert "5 link" in text
         assert "itch" not in text.lower() or "itch:" not in text  # itch not mentioned when count=0
 
     def test_itch_only_success(self) -> None:
-        text = format_dispatch_summary(
-            steam_count=0, itch_count=3, steam_ok=None, itch_ok=True
-        )
+        text = format_dispatch_summary(steam_count=0, itch_count=3, steam_ok=None, itch_ok=True)
         assert "✅ itch" in text
         assert "3 link" in text
 
     def test_both_success(self) -> None:
-        text = format_dispatch_summary(
-            steam_count=2, itch_count=3, steam_ok=True, itch_ok=True
-        )
+        text = format_dispatch_summary(steam_count=2, itch_count=3, steam_ok=True, itch_ok=True)
         assert "✅ Steam" in text
         assert "✅ itch" in text
 
@@ -133,9 +123,7 @@ class TestFormatDispatchSummary:
         assert "unknown error" in text
 
     def test_eta_message_present(self) -> None:
-        text = format_dispatch_summary(
-            steam_count=1, itch_count=0, steam_ok=True, itch_ok=None
-        )
+        text = format_dispatch_summary(steam_count=1, itch_count=0, steam_ok=True, itch_ok=None)
         assert "1–8 min" in text or "1-8 min" in text
 
 

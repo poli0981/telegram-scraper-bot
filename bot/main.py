@@ -15,18 +15,33 @@ PERSISTENCE GOTCHA — read this before refactoring:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
+import time
 from collections.abc import Awaitable, Callable
 
 import httpx
-from telegram.ext import Application, ApplicationBuilder, PicklePersistence
+from telegram import BotCommand
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    PicklePersistence,
+)
 
 from bot.config import Config, ConfigError
 from bot.dispatcher import Dispatcher
 from bot.gates import ConcurrencyLock, RateLimit
+from bot.handlers.callbacks import quick_callback, retry_callback
 from bot.handlers.conversation import build_conversation_handler
 from bot.handlers.error import error_handler
+from bot.handlers.help import help_command
+from bot.handlers.retry import retry_command
+from bot.handlers.shortcuts import quick_dispatch
+from bot.handlers.status import status_command
+from bot.handlers.version import version_command
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +52,20 @@ _KEY_HTTP_CLIENT = "http_client"
 _KEY_DISPATCHER = "dispatcher"
 _KEY_LOCK = "lock"
 _KEY_RATE_LIMIT = "rate_limit"
+
+# How long _post_shutdown waits for in-flight dispatches before forcing exit
+_SHUTDOWN_GRACE_SECONDS = 30.0
+
+# Slash commands surfaced to Telegram clients via setMyCommands
+_BOT_COMMANDS = [
+    BotCommand("start", "Start the wizard"),
+    BotCommand("q", "Quick dispatch: /q <url1> <url2> ..."),
+    BotCommand("retry", "Replay last dispatch"),
+    BotCommand("status", "Quota + lock state"),
+    BotCommand("help", "List commands"),
+    BotCommand("version", "Bot metadata"),
+    BotCommand("cancel", "Cancel wizard"),
+]
 
 
 def _make_post_init(config: Config) -> Callable[[Application], Awaitable[None]]:
@@ -69,20 +98,62 @@ def _make_post_init(config: Config) -> Callable[[Application], Awaitable[None]]:
             global_max=config.rate_limit_global_max,
             global_window=float(config.rate_limit_global_window),
         )
+        # Initialize the dicts that /retry and /q populate, in case this is
+        # the first run and the pickle hasn't seeded them yet.
+        application.bot_data.setdefault("last_dispatch", {})
+        application.bot_data.setdefault("pending_quick", {})
+
         log.info(
             "post_init: config + dispatcher + gates attached "
-            "(rate=%d/%ds user, %d/%ds global)",
+            "(rate=%d/%ds user, %d/%ds global, sha=%s)",
             config.rate_limit_user_max,
             config.rate_limit_user_window,
             config.rate_limit_global_max,
             config.rate_limit_global_window,
+            config.git_sha,
         )
+
+        # Surface commands to the Telegram client (idempotent — safe to retry).
+        try:
+            await application.bot.set_my_commands(_BOT_COMMANDS)
+            await application.bot.set_my_short_description(
+                "Dispatch Steam/itch.io scrapers via GitHub Actions"
+            )
+            await application.bot.set_my_description(
+                "Paste links → preview → dispatch. Type /help for commands."
+            )
+            log.info("post_init: setMyCommands + descriptions registered")
+        except Exception as e:  # noqa: BLE001 — don't crash startup over UI metadata
+            log.warning("post_init: failed to set bot commands/description: %s", e)
 
     return _post_init
 
 
 async def _post_shutdown(application: Application) -> None:
-    """Clean up the httpx client on shutdown."""
+    """Wait briefly for in-flight dispatches, then close the httpx client.
+
+    Without the wait, a SIGTERM mid-dispatch would race the httpx client close
+    against the pending POST → likely transport error logged for no good reason.
+    """
+    lock: ConcurrencyLock | None = application.bot_data.get(_KEY_LOCK)
+    # `_holders` is a private attribute; access is intentional because we own
+    # ConcurrencyLock and prefer this over adding a public count() method that
+    # only this code path needs.
+    if lock is not None and lock._holders:
+        log.info(
+            "post_shutdown: waiting up to %.0fs for %d in-flight dispatch(es)",
+            _SHUTDOWN_GRACE_SECONDS,
+            len(lock._holders),
+        )
+        deadline = time.monotonic() + _SHUTDOWN_GRACE_SECONDS
+        while lock._holders and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+        if lock._holders:
+            log.warning(
+                "post_shutdown: %d dispatch(es) still in flight at shutdown",
+                len(lock._holders),
+            )
+
     client: httpx.AsyncClient | None = application.bot_data.get(_KEY_HTTP_CLIENT)
     if client is not None:
         await client.aclose()
@@ -105,7 +176,26 @@ def build_application(config: Config) -> Application:
     )
     # NOTE: do NOT set bot_data here — see PERSISTENCE GOTCHA at top of file.
     # bot_data is populated inside the post_init closure above.
+
+    # Conversation handler comes first so its CommandHandlers (e.g. /cancel
+    # within a state) win over global ones.
     app.add_handler(build_conversation_handler())
+
+    # Global commands available outside any conversation. Kept on the default
+    # handler group, registered after the ConversationHandler so an in-progress
+    # wizard's /cancel still wins.
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("version", version_command))
+    app.add_handler(CommandHandler("q", quick_dispatch))
+    app.add_handler(CommandHandler("retry", retry_command))
+
+    # Global callback handlers for inline buttons that originate outside the
+    # ConversationHandler (or that need to fire even when the user has no
+    # active conversation — e.g., the "🔁 Retry" button on a dispatch failure).
+    app.add_handler(CallbackQueryHandler(quick_callback, pattern=r"^quick:"))
+    app.add_handler(CallbackQueryHandler(retry_callback, pattern=r"^retry:"))
+
     app.add_error_handler(error_handler)
     return app
 
@@ -127,7 +217,7 @@ def main() -> int:
     )
 
     app = build_application(config)
-    app.run_polling(allowed_updates=["message"])
+    app.run_polling(allowed_updates=["message", "callback_query"])
     return 0
 
 

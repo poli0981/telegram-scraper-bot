@@ -159,6 +159,43 @@ class TestFormatRetryAfter:
         assert format_retry_after(seconds) == expected
 
 
+# ─── RateLimit.remaining (used by /status) ──────────────────────
+
+
+class TestRateLimitRemaining:
+    def test_idle_user_has_full_quota(self) -> None:
+        rl = RateLimit(user_max=3, user_window=60.0, global_max=10, global_window=60.0)
+        rem = rl.remaining(42, now=100.0)
+        assert rem.user_used == 0
+        assert rem.user_max == 3
+        assert rem.user_reset_in == 0.0
+        assert rem.global_used == 0
+
+    def test_used_dispatches_count_against_quota(self) -> None:
+        rl = RateLimit(user_max=3, user_window=60.0, global_max=10, global_window=60.0)
+        rl.record(42, now=100.0)
+        rl.record(42, now=101.0)
+        rem = rl.remaining(42, now=102.0)
+        assert rem.user_used == 2
+        # Reset = oldest entry (100.0) + window (60) - now (102) = 58s
+        assert 57 <= rem.user_reset_in <= 59
+
+    def test_global_count_aggregates_across_users(self) -> None:
+        rl = RateLimit(user_max=3, user_window=60.0, global_max=10, global_window=60.0)
+        rl.record(1, now=100.0)
+        rl.record(2, now=101.0)
+        rem = rl.remaining(3, now=102.0)
+        assert rem.user_used == 0  # user 3 hasn't dispatched
+        assert rem.global_used == 2
+
+    def test_pruned_entries_dont_count(self) -> None:
+        rl = RateLimit(user_max=3, user_window=60.0, global_max=10, global_window=60.0)
+        rl.record(42, now=100.0)
+        # 60s later the entry has slid out of the window
+        rem = rl.remaining(42, now=161.0)
+        assert rem.user_used == 0
+
+
 # ─── Smoke: combined gate behavior ──────────────────────────────
 
 

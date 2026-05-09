@@ -6,3 +6,7 @@ httpx==0.27.2
 
 # .env loader
 python-dotenv==1.0.1
+
+# Optional JSON log formatter — used when LOG_FORMAT=json. Bot falls back to
+# plain text gracefully if the import fails.
+python-json-logger==2.0.7
