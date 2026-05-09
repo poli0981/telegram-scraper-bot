@@ -78,7 +78,9 @@ class TestParseJsonObjects:
         assert parse_uploaded_file("links.json", data) == ["url1", "url2"]
 
     def test_object_with_non_string_link_skipped(self) -> None:
-        data = json.dumps([{"link": "url1"}, {"link": 123}, {"link": None}, {"link": "url2"}]).encode()
+        data = json.dumps(
+            [{"link": "url1"}, {"link": 123}, {"link": None}, {"link": "url2"}]
+        ).encode()
         assert parse_uploaded_file("links.json", data) == ["url1", "url2"]
 
     def test_mixed_strings_and_objects(self) -> None:

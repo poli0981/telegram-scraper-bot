@@ -1,9 +1,15 @@
 services:
   bot:
-    build: .
+    build:
+      context: .
+      args:
+        # Pass the git SHA into the image so /version surfaces it.
+        # Set externally:  GIT_SHA=$(git rev-parse --short HEAD) docker compose build
+        GIT_SHA: ${GIT_SHA:-dev}
     image: telegram-scraper-bot:latest
     container_name: telegram-scraper-bot
     restart: unless-stopped
+    stop_grace_period: 35s  # > _SHUTDOWN_GRACE_SECONDS (30s) so SIGTERM finishes cleanly
     env_file: .env
     volumes:
       - ./state:/app/state

@@ -39,27 +39,59 @@ GitHub Actions, so bot uptime is non-critical.
 ## User flow
 
 ```
-/start → mode picker (Steam | itch | mixed)
+/start → mode picker (inline buttons: Steam | itch | mixed | cancel)
         ↓
         Paste links (multiple messages OK, or upload .txt / .json)
+        /show — peek at buffer · /reset — clear buffer
         ↓
-        /done → preview: "Steam: 12, itch: 3, invalid: 2 — confirm?"
+        /done → preview with inline buttons (✅ Confirm | ✏️ Edit | ❌ Cancel)
         ↓
-        /yes → workflow dispatched, bot replies "Dispatching..."
+        Confirm → workflow dispatched, bot posts placeholder per platform
         ↓
-        ~1–8 min later: bot edits message with result summary
+        ~1–8 min later: workflow edits placeholder(s) with result summary
+
+Shortcuts:
+        /q <url1> <url2> ...   one-shot, bypass wizard
+        /retry                 replay last dispatch (within 30 min)
 ```
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `/start`, `/scrape` | Open the wizard |
+| `/steam`, `/itch`, `/mixed` | Pick mode (slash, in CHOOSE state) |
+| `/done` | Finish collecting → preview |
+| `/yes` | Confirm and dispatch (or use ✅ button) |
+| `/reset` | Clear buffer mid-COLLECT |
+| `/show` | Peek at the current buffer |
+| `/cancel` | Abort wizard (releases lock) |
+| `/q <urls...>` | One-shot dispatch, bypass wizard |
+| `/retry` | Replay last dispatch (TTL 30 min) |
+| `/status` | Quota + lock state |
+| `/version` | Bot metadata (git SHA, Python, workflow ref) |
+| `/help` | List commands |
 
 ## Features
 
 - **Three modes**: `/steam`, `/itch`, `/mixed` (auto-routes by URL)
+- **Inline keyboards**: mode picker + confirm/edit/cancel buttons; works alongside slash commands
+- **Telegram command menu**: bot calls `setMyCommands` at boot so `/` autocompletes
 - **Text or file input**: paste links inline or upload `.txt` / `.json` (max 256 KB)
 - **Preview before dispatch**: shows count breakdown, dedupes, samples invalid lines
 - **Per-platform callbacks**: each platform gets its own placeholder that the workflow edits independently
-- **Concurrency lock**: one in-flight dispatch per user; auto-releases after 10 min if stale
+- **🔁 Retry button**: failed dispatches surface a one-tap retry
+- **`/q` quick dispatch**: skip the wizard entirely for ad-hoc URL drops
+- **`/retry` replay**: resend your last dispatch within 30 min
+- **Concurrency lock**: one in-flight dispatch per user; `/cancel` releases it; auto-stale at 10 min
 - **Rate limiting**: sliding window per-user (3/30min default) and global (10/hour default)
-- **Crash recovery**: conversation state persists in a pickle file; bot can restart mid-flow without losing buffered links
+- **`/status` introspection**: see remaining quota and whether a dispatch is in flight
+- **Crash recovery**: conversation + last_dispatch state persists in a pickle file
+- **Graceful shutdown**: SIGTERM waits up to 30s for in-flight dispatches before closing
 - **Error boundary**: unhandled exceptions are logged with full traceback; user sees a non-leaky generic notice
+- **Token redaction**: dispatcher log output strips anything resembling a GitHub PAT or Telegram bot token
+- **Structured logs**: set `LOG_FORMAT=json` for line-delimited JSON
+- **Docker HEALTHCHECK**: process-based liveness probe
 
 ## Quickstart (development)
 
@@ -123,8 +155,9 @@ ruff format bot/ tests/                 # format
 - [x] **Phase 1** — Steam end-to-end (dispatcher + conversation handler + workflow)
 - [x] **Phase 2** — itch + `/mixed` mode (separate placeholder per platform)
 - [x] **Phase 3** — Hardening (concurrency, file upload, persistence, rate limit, error boundary)
-- [ ] **Phase 4** — Deployment (Docker + systemd) — *most done in Phase 0; verify in deploy*
-- [ ] **Phase 5** — Quick-add shortcut (deferred until v1 dogfood)
+- [x] **Phase 4** — Deployment polish (Docker HEALTHCHECK, graceful SIGTERM, JSON logs, CI)
+- [x] **Phase 5** — Quick-add `/q`, `/retry`, inline keyboards, command menu, status/version
+- [ ] **Phase 6** — Workflow-side run URL surfacing (PR into `steam-f2p-tracker` + `itchio-f2p-tracker` to edit message with `https://github.com/<owner>/<repo>/actions/runs/<run_id>` after ingest)
 
 ## License
 

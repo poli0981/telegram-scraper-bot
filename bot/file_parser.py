@@ -40,9 +40,7 @@ def parse_uploaded_file(filename: str, data: bytes) -> list[str]:
         UnsupportedFileError: If JSON is malformed or has unexpected shape.
     """
     if len(data) > MAX_FILE_SIZE:
-        raise FileTooLargeError(
-            f"File is {len(data)} bytes; max allowed is {MAX_FILE_SIZE}."
-        )
+        raise FileTooLargeError(f"File is {len(data)} bytes; max allowed is {MAX_FILE_SIZE}.")
 
     text = data.decode("utf-8", errors="replace")
     name_lower = filename.lower()
@@ -85,7 +83,5 @@ def _parse_json(text: str) -> list[str]:
             if s:
                 out.append(s)
         else:
-            raise UnsupportedFileError(
-                f"JSON item at index {i} is neither a string nor an object."
-            )
+            raise UnsupportedFileError(f"JSON item at index {i} is neither a string nor an object.")
     return out

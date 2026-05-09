@@ -2,6 +2,9 @@
 
 Uses PTB's Application + AsyncMock dispatcher to exercise handlers without
 hitting any network. Each test simulates one user → one full conversation.
+
+Common fixtures (`app`, `config`, `mock_dispatcher`) and helpers (`make_update`,
+`make_context`) live in conftest.py and are shared with the other handler tests.
 """
 
 from __future__ import annotations
@@ -9,10 +12,9 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram import Chat, Message, ReplyKeyboardMarkup, Update, User
-from telegram.ext import Application, ApplicationBuilder, ContextTypes, ConversationHandler
+from telegram import Chat, InlineKeyboardMarkup, Message, Update, User
+from telegram.ext import Application, ConversationHandler
 
-from bot.config import Config
 from bot.dispatcher import DispatchResult
 from bot.gates import ConcurrencyLock, RateLimit
 from bot.handlers.conversation import (
@@ -23,101 +25,15 @@ from bot.handlers.conversation import (
     collect_file,
     confirm_yes,
     done,
+    reset_buffer,
+    show_buffer,
     start,
 )
+from tests.conftest import make_context, make_update
 
-# ─── Fixtures ───────────────────────────────────────────────────
-
-
-@pytest.fixture
-def config() -> Config:
-    """Test config with one allowed user (id=42)."""
-    return Config(
-        bot_token="fake-token",
-        gh_pat="fake-pat",
-        allowed_user_ids=frozenset({42}),
-        steam_repo="user/steam",
-        itch_repo="user/itch",
-        max_links_per_dispatch=5,  # small for tests
-    )
-
-
-@pytest.fixture
-def mock_dispatcher() -> AsyncMock:
-    """Dispatcher mock — returns success by default."""
-    d = AsyncMock()
-    d.dispatch = AsyncMock(
-        return_value=DispatchResult(ok=True, repo="user/repo", status_code=204)
-    )
-    return d
-
-
-@pytest.fixture
-def app(
-    config: Config,
-    mock_dispatcher: AsyncMock,
-) -> Application:
-    """PTB Application with bot_data prewired.
-
-    We don't enter the `async with application:` lifecycle since handler unit
-    tests don't need polling, the job queue, or bot.initialize() (which would
-    try to reach the Telegram API).
-
-    PTB v21's ExtBot inherits from a frozen TelegramObject; we bypass the
-    freeze with object.__setattr__ to inject AsyncMock methods.
-    """
-    application = ApplicationBuilder().token("fake-token").build()
-    application.bot_data["config"] = config
-    application.bot_data["dispatcher"] = mock_dispatcher
-    # Generous gates so they don't interfere with most tests; specific
-    # gate-behavior tests build their own restricted instances.
-    application.bot_data["lock"] = ConcurrencyLock(stale_after=600.0)
-    application.bot_data["rate_limit"] = RateLimit(
-        user_max=100, user_window=60.0, global_max=1000, global_window=60.0
-    )
-
-    # Stub the bot methods our handlers call. send_message returns a Message-like
-    # object with .message_id so confirm_yes can use it as the dispatch target.
-    bot = application.bot
-    placeholder = MagicMock(spec=Message)
-    placeholder.message_id = 9999
-    object.__setattr__(bot, "send_message", AsyncMock(return_value=placeholder))
-    object.__setattr__(bot, "edit_message_text", AsyncMock())
-    return application
-
-
-def _make_update(
-    text: str,
-    *,
-    user_id: int = 42,
-    chat_id: int = 1000,
-    message_id: int = 1,
-) -> Update:
-    """Construct a minimal Update with a text message.
-
-    Uses MagicMock for Message.reply_text so we can assert on it without
-    going through the real Bot API.
-    """
-    user = User(id=user_id, first_name="Test", is_bot=False, username="testuser")
-    chat = Chat(id=chat_id, type="private")
-    message = MagicMock(spec=Message)
-    message.text = text
-    message.message_id = message_id
-    message.chat = chat
-    message.from_user = user
-    message.reply_text = AsyncMock()
-    update = Update(update_id=1, message=message)
-    # Override effective_user / effective_chat / effective_message
-    update._effective_user = user
-    update._effective_chat = chat
-    update._effective_message = message
-    return update
-
-
-def _make_context(app: Application) -> ContextTypes.DEFAULT_TYPE:
-    """Build a Context with bot_data + user_data shared via app."""
-    context = ContextTypes.DEFAULT_TYPE(application=app, chat_id=1000, user_id=42)
-    return context
+# Compatibility aliases — keeps the body of legacy tests in this file unchanged.
+_make_update = make_update
+_make_context = make_context
 
 
 # ─── /start ─────────────────────────────────────────────────────
@@ -130,9 +46,9 @@ class TestStart:
         next_state = await start(update, ctx)
         assert next_state == State.CHOOSE
         update.message.reply_text.assert_called_once()
-        # Keyboard should be in reply
+        # /start now ships an inline keyboard with mode buttons
         kwargs = update.message.reply_text.call_args.kwargs
-        assert isinstance(kwargs["reply_markup"], ReplyKeyboardMarkup)
+        assert isinstance(kwargs["reply_markup"], InlineKeyboardMarkup)
 
     async def test_unauthorized_user_rejected(self, app: Application) -> None:
         update = _make_update("/start", user_id=999)  # not in allow-list
@@ -155,9 +71,7 @@ class TestStart:
 
 class TestChooseMode:
     @pytest.mark.parametrize("cmd", ["/steam", "/itch", "/mixed"])
-    async def test_valid_modes_advance_to_collect(
-        self, app: Application, cmd: str
-    ) -> None:
+    async def test_valid_modes_advance_to_collect(self, app: Application, cmd: str) -> None:
         update = _make_update(cmd)
         ctx = _make_context(app)
         next_state = await choose_mode(update, ctx)
@@ -832,14 +746,89 @@ class TestCancel:
         assert next_state == ConversationHandler.END
         assert ctx.user_data == {}
 
+    async def test_cancel_releases_concurrency_lock(self, app: Application) -> None:
+        """If /cancel runs while a lock is held, the lock must be released.
+
+        Otherwise a user who got stuck mid-dispatch would be locked out for up
+        to 10 minutes (until stale_after expires).
+        """
+        lock: ConcurrencyLock = app.bot_data["lock"]
+        lock.try_acquire(42)
+        assert lock.is_held(42)
+
+        update = _make_update("/cancel")
+        ctx = _make_context(app)
+        await cancel(update, ctx)
+
+        assert lock.is_held(42) is False
+
+
+# ─── /reset and /show (COLLECT helpers) ────────────────────────
+
+
+class TestResetBuffer:
+    async def test_reset_clears_buffer(self, app: Application) -> None:
+        update = _make_update("/reset")
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        ctx.user_data["buffer"] = ["url1", "url2"]
+
+        next_state = await reset_buffer(update, ctx)
+
+        assert next_state == State.COLLECT
+        assert ctx.user_data["buffer"] == []
+        # Mode preserved — only the buffer is cleared
+        assert ctx.user_data["mode"] == "mixed"
+
+
+class TestShowBuffer:
+    async def test_show_empty_buffer(self, app: Application) -> None:
+        update = _make_update("/show")
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        ctx.user_data["buffer"] = []
+
+        next_state = await show_buffer(update, ctx)
+
+        assert next_state == State.COLLECT
+        reply = update.message.reply_text.call_args.args[0]
+        assert "empty" in reply.lower()
+
+    async def test_show_buffer_lists_lines(self, app: Application) -> None:
+        update = _make_update("/show")
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        ctx.user_data["buffer"] = [
+            "https://store.steampowered.com/app/440/",
+            "https://x.itch.io/y",
+        ]
+
+        await show_buffer(update, ctx)
+
+        reply = update.message.reply_text.call_args.args[0]
+        # Count is rendered, plus a sample of each line (truncated)
+        assert "2" in reply
+        assert "440" in reply
+
+    async def test_show_buffer_truncates_long_lists(self, app: Application) -> None:
+        """A buffer larger than _BUFFER_SHOW_LIMIT should yield an 'and N more'."""
+        update = _make_update("/show")
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        # Way more than the show limit (10)
+        ctx.user_data["buffer"] = [f"url{i}" for i in range(15)]
+
+        await show_buffer(update, ctx)
+
+        reply = update.message.reply_text.call_args.args[0]
+        assert "and" in reply.lower() and "more" in reply.lower()
+
 
 # ─── End-to-end happy path ──────────────────────────────────────
 
 
 class TestEndToEnd:
-    async def test_full_steam_flow(
-        self, app: Application, mock_dispatcher: AsyncMock
-    ) -> None:
+    async def test_full_steam_flow(self, app: Application, mock_dispatcher: AsyncMock) -> None:
         """/start → /steam → paste → /done → /yes → dispatched."""
         ctx = _make_context(app)
 
@@ -878,9 +867,7 @@ class TestEndToEnd:
         # State cleaned up
         assert ctx.user_data == {}
 
-    async def test_full_mixed_flow(
-        self, app: Application, mock_dispatcher: AsyncMock
-    ) -> None:
+    async def test_full_mixed_flow(self, app: Application, mock_dispatcher: AsyncMock) -> None:
         """/mixed mode dispatches both platforms with separate placeholders."""
         ctx = _make_context(app)
 
@@ -909,8 +896,7 @@ class TestEndToEnd:
 
         # Verify each platform got the right URLs
         calls_by_repo = {
-            c.kwargs["repo"]: c.kwargs["links"]
-            for c in mock_dispatcher.dispatch.call_args_list
+            c.kwargs["repo"]: c.kwargs["links"] for c in mock_dispatcher.dispatch.call_args_list
         }
         assert len(calls_by_repo["user/steam"]) == 2
         assert len(calls_by_repo["user/itch"]) == 2

@@ -116,9 +116,7 @@ class TestDispatchSuccess:
         assert "telegram-scraper-bot" in headers["user-agent"]
 
     @respx.mock
-    async def test_uses_configured_workflow_file_and_ref(
-        self, client: httpx.AsyncClient
-    ) -> None:
+    async def test_uses_configured_workflow_file_and_ref(self, client: httpx.AsyncClient) -> None:
         d = Dispatcher(client, "fake-pat", workflow_file="custom.yml", ref="develop")
         route = respx.post(
             "https://api.github.com/repos/user/repo/actions/workflows/custom.yml/dispatches"
@@ -235,3 +233,21 @@ class TestDispatchFailures:
 
         assert result.ok is False
         assert result.error == "<empty>"
+
+    @respx.mock
+    async def test_redacts_token_shaped_strings_in_error_body(self, dispatcher: Dispatcher) -> None:
+        # Simulate a misbehaving proxy that echoes the auth header in its body.
+        leaky_body = (
+            "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789 " "rejected by upstream"
+        )
+        respx.post(
+            "https://api.github.com/repos/user/repo/actions/workflows/bot-ingest.yml/dispatches"
+        ).mock(return_value=httpx.Response(500, text=leaky_body))
+
+        result = await dispatcher.dispatch("user/repo", ["http://x.itch.io/y"], 1, 1)
+
+        assert result.ok is False
+        # The token is gone; the surrounding context survives.
+        assert "ghp_" not in result.error
+        assert "REDACTED" in result.error
+        assert "rejected by upstream" in result.error
