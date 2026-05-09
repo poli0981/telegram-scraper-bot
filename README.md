@@ -50,6 +50,17 @@ GitHub Actions, so bot uptime is non-critical.
         ~1–8 min later: bot edits message with result summary
 ```
 
+## Features
+
+- **Three modes**: `/steam`, `/itch`, `/mixed` (auto-routes by URL)
+- **Text or file input**: paste links inline or upload `.txt` / `.json` (max 256 KB)
+- **Preview before dispatch**: shows count breakdown, dedupes, samples invalid lines
+- **Per-platform callbacks**: each platform gets its own placeholder that the workflow edits independently
+- **Concurrency lock**: one in-flight dispatch per user; auto-releases after 10 min if stale
+- **Rate limiting**: sliding window per-user (3/30min default) and global (10/hour default)
+- **Crash recovery**: conversation state persists in a pickle file; bot can restart mid-flow without losing buffered links
+- **Error boundary**: unhandled exceptions are logged with full traceback; user sees a non-leaky generic notice
+
 ## Quickstart (development)
 
 ```bash
@@ -109,10 +120,10 @@ ruff format bot/ tests/                 # format
 ### Roadmap
 
 - [x] **Phase 0** — Repo skeleton, classifier (full impl), config, test setup
-- [ ] **Phase 1** — Steam end-to-end (dispatcher + conversation handler + workflow)
-- [ ] **Phase 2** — itch + `/mixed` mode
-- [ ] **Phase 3** — Hardening (concurrency, file upload, persistence, rate limit, error boundary)
-- [ ] **Phase 4** — Deployment (Docker + systemd)
+- [x] **Phase 1** — Steam end-to-end (dispatcher + conversation handler + workflow)
+- [x] **Phase 2** — itch + `/mixed` mode (separate placeholder per platform)
+- [x] **Phase 3** — Hardening (concurrency, file upload, persistence, rate limit, error boundary)
+- [ ] **Phase 4** — Deployment (Docker + systemd) — *most done in Phase 0; verify in deploy*
 - [ ] **Phase 5** — Quick-add shortcut (deferred until v1 dogfood)
 
 ## License
