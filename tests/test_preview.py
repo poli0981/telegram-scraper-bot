@@ -26,6 +26,26 @@ class TestFormatPreview:
         assert "mixed" in text
         assert "/yes" in text
 
+    def test_duplicate_count_rendered(self) -> None:
+        text = format_preview(
+            steam=["https://store.steampowered.com/app/440/"],
+            itch=[],
+            invalid=[],
+            mode="steam",
+            duplicate_count=3,
+        )
+        assert "Duplicates (skipped): *3*" in text
+
+    def test_duplicate_count_zero_still_rendered(self) -> None:
+        """Symmetric with Invalid: row always shown so the layout is stable."""
+        text = format_preview(
+            steam=["https://store.steampowered.com/app/440/"],
+            itch=[],
+            invalid=[],
+            mode="steam",
+        )
+        assert "Duplicates (skipped): *0*" in text
+
     def test_shows_invalid_samples(self) -> None:
         invalid = [
             ClassifiedLink(LinkKind.INVALID, "garbage1", "garbage1"),

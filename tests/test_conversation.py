@@ -140,6 +140,58 @@ class TestCollect:
         reply = update.message.reply_text.call_args.args[0]
         assert "limit" in reply.lower()
 
+    async def test_live_dedupe_warns_on_duplicate_paste(self, app: Application) -> None:
+        """Pasting a URL already in the buffer should be skipped + reported."""
+        update = _make_update(
+            "https://store.steampowered.com/app/440/\n"
+            "https://store.steampowered.com/app/440/"  # second is a dup
+        )
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        ctx.user_data["buffer"] = []
+
+        await collect(update, ctx)
+
+        # Only one copy in buffer
+        assert len(ctx.user_data["buffer"]) == 1
+        # seen_urls tracks the canonical URL
+        assert "https://store.steampowered.com/app/440/" in ctx.user_data["seen_urls"]
+        # User got a warning about the duplicate
+        reply = update.message.reply_text.call_args.args[0]
+        assert "duplicate" in reply.lower()
+
+    async def test_live_dedupe_across_separate_messages(self, app: Application) -> None:
+        """Duplicate detection survives between paste messages within one wizard."""
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        ctx.user_data["buffer"] = []
+
+        # First paste
+        u1 = _make_update("https://store.steampowered.com/app/440/")
+        await collect(u1, ctx)
+        # Second paste — same URL
+        u2 = _make_update("https://store.steampowered.com/app/440/")
+        await collect(u2, ctx)
+
+        assert len(ctx.user_data["buffer"]) == 1
+        reply = u2.message.reply_text.call_args.args[0]
+        assert "duplicate" in reply.lower()
+
+    async def test_concatenated_urls_split_into_buffer(self, app: Application) -> None:
+        """Concat URLs (no separator) become two buffer entries via split_inline_urls."""
+        update = _make_update(
+            "https://store.steampowered.com/app/4343200/Pets/"
+            "https://store.steampowered.com/app/1170880/Hollow/"
+        )
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        ctx.user_data["buffer"] = []
+
+        await collect(update, ctx)
+
+        # Buffer holds 2 entries (one per URL), not one concat
+        assert len(ctx.user_data["buffer"]) == 2
+
 
 # ─── COLLECT state — file upload ────────────────────────────────
 
@@ -204,20 +256,29 @@ class TestCollectFile:
         reply = update.message.reply_text.call_args.args[0]
         assert "Unsupported file type" in reply
 
-    async def test_malformed_json_rejected(self, app: Application) -> None:
+    async def test_malformed_json_cancels_wizard(self, app: Application) -> None:
+        """Malformed JSON is treated as a copy-paste mistake — cancel the wizard.
+
+        Rationale: the user almost certainly needs to fix the file and re-upload
+        from scratch. Letting them stay in COLLECT with a half-populated buffer
+        is more confusing than starting fresh.
+        """
         update = _make_document_update(
             file_name="links.json",
             file_bytes=b"{not valid json",
         )
         ctx = _make_context(app)
         ctx.user_data["mode"] = "itch"
-        ctx.user_data["buffer"] = []
+        ctx.user_data["buffer"] = ["https://x.itch.io/y"]  # had stuff before upload
 
-        await collect_file(update, ctx)
+        next_state = await collect_file(update, ctx)
 
-        assert ctx.user_data["buffer"] == []
+        # Wizard ended; user_data wiped
+        assert next_state == ConversationHandler.END
+        assert ctx.user_data == {}
         reply = update.message.reply_text.call_args.args[0]
-        assert "Failed to parse" in reply
+        assert "JSON error" in reply
+        assert "/start" in reply  # tell user how to recover
 
     async def test_empty_file_warned(self, app: Application) -> None:
         update = _make_document_update(file_name="links.txt", file_bytes=b"")
@@ -779,6 +840,18 @@ class TestResetBuffer:
         assert ctx.user_data["buffer"] == []
         # Mode preserved — only the buffer is cleared
         assert ctx.user_data["mode"] == "mixed"
+
+    async def test_reset_clears_seen_urls_too(self, app: Application) -> None:
+        """Without this, post-reset the user couldn't re-paste the same URL."""
+        update = _make_update("/reset")
+        ctx = _make_context(app)
+        ctx.user_data["mode"] = "mixed"
+        ctx.user_data["buffer"] = ["https://store.steampowered.com/app/440/"]
+        ctx.user_data["seen_urls"] = {"https://store.steampowered.com/app/440/"}
+
+        await reset_buffer(update, ctx)
+
+        assert ctx.user_data["seen_urls"] == set()
 
 
 class TestShowBuffer:

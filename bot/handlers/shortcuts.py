@@ -49,6 +49,7 @@ async def quick_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     classified = classify_batch("\n".join(args))
     deduped = dedupe_preserve_order(classified)
+    duplicate_count = len(classified) - len(deduped)
     steam, itch, invalid = split_by_kind(deduped)
 
     if not steam and not itch:
@@ -74,7 +75,14 @@ async def quick_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "ts": time.time(),
     }
 
-    preview_text = format_preview(steam, itch, invalid, "mixed", inline=True)
+    preview_text = format_preview(
+        steam,
+        itch,
+        invalid,
+        "mixed",
+        duplicate_count=duplicate_count,
+        inline=True,
+    )
     keyboard = InlineKeyboardMarkup(
         [
             [

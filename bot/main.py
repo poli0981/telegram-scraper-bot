@@ -42,6 +42,7 @@ from bot.handlers.retry import retry_command
 from bot.handlers.shortcuts import quick_dispatch
 from bot.handlers.status import status_command
 from bot.handlers.version import version_command
+from bot.handlers.whoami import whoami_command
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ _BOT_COMMANDS = [
     BotCommand("q", "Quick dispatch: /q <url1> <url2> ..."),
     BotCommand("retry", "Replay last dispatch"),
     BotCommand("status", "Quota + lock state"),
+    BotCommand("whoami", "Show your user ID + auth status"),
     BotCommand("help", "List commands"),
     BotCommand("version", "Bot metadata"),
     BotCommand("cancel", "Cancel wizard"),
@@ -112,6 +114,22 @@ def _make_post_init(config: Config) -> Callable[[Application], Awaitable[None]]:
             config.rate_limit_global_window,
             config.git_sha,
         )
+
+        # Verify BOT_TOKEN by hitting getMe. Catches "you typed the wrong
+        # token" failures at boot instead of waiting for the first /start.
+        # Re-raises so a bad token aborts startup loudly rather than running
+        # a zombie process that can't actually talk to Telegram.
+        try:
+            me = await application.bot.get_me()
+            log.info(
+                "post_init: connected as @%s (id=%d, name=%s)",
+                me.username,
+                me.id,
+                me.first_name,
+            )
+        except Exception as e:
+            log.error("post_init: getMe failed — BOT_TOKEN likely invalid: %s", e)
+            raise
 
         # Surface commands to the Telegram client (idempotent — safe to retry).
         try:
@@ -189,6 +207,9 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("version", version_command))
     app.add_handler(CommandHandler("q", quick_dispatch))
     app.add_handler(CommandHandler("retry", retry_command))
+    # /whoami is intentionally registered without auth so unauthorized users
+    # can self-discover their user_id for ALLOWED_USER_IDS configuration.
+    app.add_handler(CommandHandler("whoami", whoami_command))
 
     # Global callback handlers for inline buttons that originate outside the
     # ConversationHandler (or that need to fire even when the user has no

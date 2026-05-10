@@ -24,6 +24,7 @@ def format_preview(
     invalid: list[ClassifiedLink],
     mode: str,
     *,
+    duplicate_count: int = 0,
     inline: bool = False,
 ) -> str:
     """Build the preview message shown before user confirms /yes.
@@ -33,6 +34,9 @@ def format_preview(
         itch: Normalized itch URLs.
         invalid: ClassifiedLink entries with kind=INVALID.
         mode: One of "steam", "itch", "mixed".
+        duplicate_count: Valid URLs that were dropped as duplicates of an
+            earlier-pasted link. Always rendered (even when 0) so the row is
+            stable across runs.
         inline: If True, omit the "Confirm? /yes or /cancel" footer because
             the caller is attaching inline buttons instead.
     """
@@ -42,6 +46,7 @@ def format_preview(
         f"Mode: `{mode}`",
         f"Steam: *{len(steam)}*",
         f"itch:  *{len(itch)}*",
+        f"Duplicates (skipped): *{duplicate_count}*",
         f"Invalid (will skip): *{len(invalid)}*",
     ]
 

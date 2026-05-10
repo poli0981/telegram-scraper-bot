@@ -8,5 +8,6 @@ callbacks.py       — inline-button callback handlers (quick:*, retry:*, confir
 help.py            — /help
 status.py          — /status (quota + lock state)
 version.py         — /version (bot metadata)
+whoami.py          — /whoami (caller's user_id; runs without auth)
 error.py           — global error boundary
 """
