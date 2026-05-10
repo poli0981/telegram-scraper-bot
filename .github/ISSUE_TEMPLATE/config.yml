@@ -1,0 +1,21 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Open-ended discussion
+    url: https://github.com/poli0981/telegram-scraper-bot/discussions
+    about: |
+      For questions, "should we build this?", or freeform conversation,
+      open a Discussion instead of an Issue.
+
+  - name: Security vulnerability (private)
+    url: https://github.com/poli0981/telegram-scraper-bot/security/advisories/new
+    about: |
+      Do NOT open a public issue for security vulnerabilities.
+      Use the GitHub Security Advisory form, email, or DM instead.
+      See SECURITY.md for the full list of channels.
+
+  - name: Direct contact (Discord, Telegram, email)
+    url: https://github.com/poli0981/telegram-scraper-bot/blob/main/AUTHORS.md
+    about: |
+      For private questions, sharing your Telegram User ID, or anything
+      that should not be public, use one of the channels in AUTHORS.md.

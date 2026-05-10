@@ -1,0 +1,136 @@
+name: Bump version
+
+# Manual helper. Operator runs:
+#   gh workflow run "Bump version" -f new_version=0.3.0
+#
+# Effects:
+#   - bumps __version__ in bot/__init__.py
+#   - bumps version in pyproject.toml
+#   - opens an [Unreleased] section reset in CHANGELOG.md if missing
+#   - commits, pushes a branch, opens a PR
+#
+# Tagging is NOT done by this workflow. After the PR is merged, the
+# maintainer locally:
+#   git pull
+#   git tag -s vX.Y.Z -m "Release vX.Y.Z"
+#   git push origin vX.Y.Z
+# which triggers release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      new_version:
+        description: "Version number without leading 'v' (e.g. 0.3.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate version
+        env:
+          NEW: ${{ inputs.new_version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$NEW" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::Version '$NEW' is not SemVer (X.Y.Z[-pre])."
+            exit 1
+          fi
+
+      - name: Compute branch name
+        id: branch
+        env:
+          NEW: ${{ inputs.new_version }}
+        run: |
+          BRANCH="release/v${NEW}"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Branch: $BRANCH"
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump bot/__init__.py
+        env:
+          NEW: ${{ inputs.new_version }}
+        run: |
+          set -euo pipefail
+          python - <<PY
+          import re, pathlib
+          p = pathlib.Path("bot/__init__.py")
+          s = p.read_text(encoding="utf-8")
+          new = re.sub(r'__version__\s*=\s*"[^"]*"',
+                       f'__version__ = "${NEW}"', s, count=1)
+          if new == s:
+              raise SystemExit("__version__ line not found in bot/__init__.py")
+          p.write_text(new, encoding="utf-8")
+          PY
+          grep '__version__' bot/__init__.py
+
+      - name: Bump pyproject.toml
+        env:
+          NEW: ${{ inputs.new_version }}
+        run: |
+          set -euo pipefail
+          python - <<PY
+          import re, pathlib
+          p = pathlib.Path("pyproject.toml")
+          s = p.read_text(encoding="utf-8")
+          # Match: version = "X.Y.Z"  (only inside [project] table is enough
+          # in practice; the regex anchors on the start-of-line "version").
+          new, n = re.subn(r'(?m)^version\s*=\s*"[^"]*"',
+                           f'version = "${NEW}"', s, count=1)
+          if n == 0:
+              raise SystemExit("version line not found in pyproject.toml")
+          p.write_text(new, encoding="utf-8")
+          PY
+          grep '^version' pyproject.toml
+
+      - name: Commit + push branch
+        id: commit
+        env:
+          NEW: ${{ inputs.new_version }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+          git checkout -b "$BRANCH"
+          git add bot/__init__.py pyproject.toml
+          if git diff --cached --quiet; then
+            echo "::error::Nothing changed; version already at $NEW?"
+            exit 1
+          fi
+          git commit -m "chore: bump version to $NEW"
+          git push -u origin "$BRANCH"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW: ${{ inputs.new_version }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: bump version to $NEW" \
+            --body "Automated version bump.
+
+After merging this PR:
+\`\`\`
+git pull
+git tag -s v$NEW -m \"Release v$NEW\"
+git push origin v$NEW
+\`\`\`
+That tag push triggers \`release.yml\` which creates the GitHub Release."

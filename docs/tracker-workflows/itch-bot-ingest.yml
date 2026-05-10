@@ -1,0 +1,119 @@
+# Drop-in workflow for the itch.io tracker repo:
+#   poli0981/free-games-itchio-list/.github/workflows/bot-ingest.yml
+#
+# Required secret in the target repo: BOT_TOKEN (same as the bot uses).
+# Adjust the `Run ingest` step to call YOUR ingest entry point.
+
+name: Bot Ingest (itch.io)
+
+on:
+  workflow_dispatch:
+    inputs:
+      links:
+        description: "Newline-separated itch.io game URLs"
+        required: true
+        type: string
+      chat_id:
+        description: "Telegram chat to edit"
+        required: true
+        type: string
+      message_id:
+        description: "Telegram message_id of the placeholder to edit"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bot-ingest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write input links to temp file
+        run: |
+          mkdir -p tmp
+          printf '%s\n' "${{ inputs.links }}" > tmp/bot_input.txt
+          echo "Received $(wc -l < tmp/bot_input.txt) line(s)"
+
+      # ─── Adjust this step to match your repo's ingest entry point ───
+      - name: Run ingest
+        id: ingest
+        run: |
+          python -m itchio_tracker.ingest_new \
+            --input tmp/bot_input.txt \
+            --output tmp/result.txt
+      # ────────────────────────────────────────────────────────────────
+
+      - name: Commit data
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/ || true
+          if ! git diff --cached --quiet; then
+            git commit -m "bot-ingest: $(wc -l < tmp/bot_input.txt) new link(s)"
+            git push
+          else
+            echo "No data/ changes to commit"
+          fi
+
+      - name: Build success text
+        if: success()
+        run: |
+          {
+            echo "✅ itch.io: ingest complete"
+            echo ""
+            if [ -s tmp/result.txt ]; then
+              head -c 3500 tmp/result.txt
+              echo ""
+            fi
+            echo ""
+            echo "🔗 https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > tmp/telegram_text.txt
+
+      - name: Build failure text
+        if: failure()
+        run: |
+          mkdir -p tmp
+          {
+            echo "❌ itch.io: ingest failed"
+            echo ""
+            echo "🔗 https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} (see logs)"
+          } > tmp/telegram_text.txt
+
+      - name: Edit Telegram placeholder
+        if: always()
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "::error::BOT_TOKEN secret is not configured; cannot edit Telegram message"
+            exit 1
+          fi
+          PAYLOAD=$(jq -n \
+            --arg     chat_id    "${{ inputs.chat_id }}" \
+            --argjson message_id  ${{ inputs.message_id }} \
+            --rawfile text       tmp/telegram_text.txt \
+            '{chat_id: $chat_id, message_id: $message_id, text: $text, disable_web_page_preview: true}')
+          curl -sS --fail-with-body -X POST \
+            "https://api.telegram.org/bot${BOT_TOKEN}/editMessageText" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" \
+            > /dev/null
