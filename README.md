@@ -6,8 +6,11 @@ ingestion → bot edits its own message with the result.
 
 Companion to:
 
-- [`steam-f2p-tracker`](https://github.com/poli0981/steam-f2p-tracker)
-- [`itchio-f2p-tracker`](https://github.com/poli0981/itchio-f2p-tracker)
+- [`free-steam-games-list`](https://github.com/poli0981/free-steam-games-list)
+- [`free-games-itchio-list`](https://github.com/poli0981/free-games-itchio-list)
+
+> **First time here?** Read [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for the
+> end-to-end walkthrough. The README below is a quick reference.
 
 ## Architecture
 
@@ -127,8 +130,8 @@ the full list. Required:
 | `BOT_TOKEN` | From [@BotFather](https://t.me/BotFather) |
 | `GH_PAT` | Fine-grained PAT, `Actions:write + Contents:read` on tracker repos |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs |
-| `STEAM_REPO` | e.g. `poli0981/steam-f2p-tracker` |
-| `ITCH_REPO` | e.g. `poli0981/itchio-f2p-tracker` |
+| `STEAM_REPO` | e.g. `poli0981/free-steam-games-list` |
+| `ITCH_REPO` | e.g. `poli0981/free-games-itchio-list` |
 
 ## Development
 
@@ -157,8 +160,28 @@ ruff format bot/ tests/                 # format
 - [x] **Phase 3** — Hardening (concurrency, file upload, persistence, rate limit, error boundary)
 - [x] **Phase 4** — Deployment polish (Docker HEALTHCHECK, graceful SIGTERM, JSON logs, CI)
 - [x] **Phase 5** — Quick-add `/q`, `/retry`, inline keyboards, command menu, status/version
-- [ ] **Phase 6** — Workflow-side run URL surfacing (PR into `steam-f2p-tracker` + `itchio-f2p-tracker` to edit message with `https://github.com/<owner>/<repo>/actions/runs/<run_id>` after ingest)
+- [x] **Phase 6** — Workflow-side run URL surfacing (drop-in templates in [`docs/tracker-workflows/`](docs/tracker-workflows/); per-tracker-repo config in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md))
+- [x] **Phase 7** — Concat URL split, live duplicate warning, JSON auto-cancel, `/whoami`, `getMe` boot check
+- [x] **Phase 8** — Legal/policy docs, GitHub templates, release + bump-version workflows, full user guide
+
+## Documentation
+
+| Document | Audience |
+|---|---|
+| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Operators + end users — full setup + daily flow + troubleshooting |
+| [`docs/DEV_ENV.md`](docs/DEV_ENV.md) | Contributors — reference dev machine spec |
+| [`docs/RELEASING.md`](docs/RELEASING.md) | Maintainer — release checklist |
+| [`docs/tracker-workflows/`](docs/tracker-workflows/) | Drop-in `bot-ingest.yml` for the two tracker repos |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contributors |
+| [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) | Everyone |
+| [`SECURITY.md`](SECURITY.md) | Security researchers |
+| [`PRIVACY.md`](PRIVACY.md) | End users |
+| [`TERMS.md`](TERMS.md) | End users + operators |
+| [`DISCLAIMER.md`](DISCLAIMER.md) | End users |
+| [`CHANGELOG.md`](CHANGELOG.md) | Everyone — what changed when |
+| [`ACKNOWLEDGEMENTS.md`](ACKNOWLEDGEMENTS.md) | Credits |
+| [`AUTHORS.md`](AUTHORS.md) | Maintainer contact channels |
 
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE).

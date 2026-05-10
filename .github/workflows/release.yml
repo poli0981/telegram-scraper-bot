@@ -1,0 +1,147 @@
+name: Release
+
+# Runs when a `v*` tag is pushed. Creates a GitHub Release with auto-
+# generated notes and (best-effort) opens a Discussion in the
+# "Announcements" category so users can comment.
+#
+# Authoring flow:
+#   1. Use the "Bump version" workflow (workflow_dispatch) to update
+#      bot/__init__.py + pyproject.toml, commit, and push.
+#   2. Locally:  git tag -s vX.Y.Z -m "..."  &&  git push origin vX.Y.Z
+#   3. This workflow fires; the existing announce-release.yml wrapper
+#      (which calls the org-level reusable workflow) handles Discord.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re-)release"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  discussions: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history needed for release notes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          if [ -z "$TAG" ]; then
+            echo "::error::No tag resolved (ref_name=$REF_NAME, input=$INPUT_TAG)"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
+      - name: Verify tag is signed
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Lightweight tags carry no signature. Annotated+signed tags carry
+          # an ASCII-armored block; we just check that the tag object exists
+          # and has a tagger header — release blockers are caught locally.
+          if ! git cat-file -t "$TAG" 2>/dev/null | grep -q '^tag$'; then
+            echo "::warning::Tag $TAG is lightweight (no annotation). Future tags should be signed (git tag -s)."
+          else
+            echo "Tag $TAG is annotated."
+            if git cat-file tag "$TAG" | grep -q '^-----BEGIN PGP SIGNATURE-----\|^-----BEGIN SSH SIGNATURE-----'; then
+              echo "Tag $TAG is signed."
+            else
+              echo "::warning::Tag $TAG is annotated but not signed."
+            fi
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # Pull the section between [VERSION] and the next [v...] heading.
+          # If we can't find it, leave empty and let gh use auto-generated notes.
+          NOTES=$(awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (capture) exit
+              if ($0 ~ "^## \\[" ver "\\]") { capture=1; next }
+            }
+            capture { print }
+          ' CHANGELOG.md || true)
+
+          if [ -z "$NOTES" ]; then
+            echo "::warning::No CHANGELOG section found for $VERSION; will use gh auto-generated notes."
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "notes<<__NOTES_EOF__"
+              echo "$NOTES"
+              echo "__NOTES_EOF__"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release (with CHANGELOG notes)
+        if: steps.notes.outputs.have_notes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          NOTES: ${{ steps.notes.outputs.notes }}
+        run: |
+          set -euo pipefail
+          # Open a discussion in "Announcements" if Discussions is enabled.
+          # Falls back to a release without a discussion if the category
+          # doesn't exist.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating notes only."
+            printf '%s\n' "$NOTES" | gh release edit "$TAG" --notes-file -
+          else
+            if printf '%s\n' "$NOTES" | gh release create "$TAG" \
+                --title "$TAG" \
+                --notes-file - \
+                --discussion-category "Announcements"; then
+              echo "Release created with Discussion."
+            else
+              echo "::warning::Could not create with discussion (Discussions may not be enabled). Retrying without."
+              printf '%s\n' "$NOTES" | gh release create "$TAG" \
+                --title "$TAG" \
+                --notes-file -
+            fi
+          fi
+
+      - name: Create GitHub Release (auto-generated notes fallback)
+        if: steps.notes.outputs.have_notes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; not overwriting auto notes."
+          else
+            if gh release create "$TAG" --title "$TAG" --generate-notes \
+                --discussion-category "Announcements"; then
+              echo "Release created with auto-notes + Discussion."
+            else
+              echo "::warning::Discussion category missing; retrying without."
+              gh release create "$TAG" --title "$TAG" --generate-notes
+            fi
+          fi
