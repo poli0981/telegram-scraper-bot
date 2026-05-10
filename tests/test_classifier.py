@@ -11,6 +11,7 @@ from bot.classifier import (
     classify_batch,
     dedupe_preserve_order,
     split_by_kind,
+    split_inline_urls,
 )
 
 # ─── classify() ─────────────────────────────────────────────────
@@ -139,6 +140,61 @@ class TestClassifyBatch:
         result = classify_batch(text)
         kinds = [r.kind for r in result]
         assert kinds == [LinkKind.STEAM, LinkKind.ITCH, LinkKind.INVALID, LinkKind.STEAM]
+
+    def test_concatenated_urls_split_into_separate_entries(self) -> None:
+        """Two Steam URLs pasted without a separator should yield two STEAMs.
+
+        Without the inline-URL splitter the greedy ``[^?\\s]*`` path component
+        in _STEAM_RE would swallow the second URL, leaving the user with only
+        the first appid.
+        """
+        text = (
+            "https://store.steampowered.com/app/4343200/Little_Petsville_Desktop/"
+            "https://store.steampowered.com/app/1170880/Grimms_Hollow/"
+        )
+        result = classify_batch(text)
+        assert len(result) == 2
+        assert all(r.kind == LinkKind.STEAM for r in result)
+        urls = {r.url for r in result}
+        assert urls == {
+            "https://store.steampowered.com/app/4343200/",
+            "https://store.steampowered.com/app/1170880/",
+        }
+
+    def test_concatenated_itch_urls_also_split(self) -> None:
+        text = "https://a.itch.io/game-ahttps://b.itch.io/game-b"
+        result = classify_batch(text)
+        assert len(result) == 2
+        assert all(r.kind == LinkKind.ITCH for r in result)
+
+
+class TestSplitInlineUrls:
+    def test_no_url_returns_line_unchanged(self) -> None:
+        assert split_inline_urls("plain text") == ["plain text"]
+
+    def test_single_url_unchanged(self) -> None:
+        url = "https://store.steampowered.com/app/440/"
+        assert split_inline_urls(url) == [url]
+
+    def test_two_concatenated_urls(self) -> None:
+        line = "https://a.com/xhttps://b.com/y"
+        assert split_inline_urls(line) == ["https://a.com/x", "https://b.com/y"]
+
+    def test_prefix_text_kept_as_first_piece(self) -> None:
+        # Non-URL prefix becomes its own piece; classify() will mark INVALID.
+        line = "see this:https://a.com/x"
+        assert split_inline_urls(line) == ["see this:", "https://a.com/x"]
+
+    def test_http_and_https_both_recognized(self) -> None:
+        line = "http://a.com/xhttps://b.com/y"
+        assert split_inline_urls(line) == ["http://a.com/x", "https://b.com/y"]
+
+    def test_empty_pieces_filtered(self) -> None:
+        line = "https://a.com/x   https://b.com/y"  # whitespace between
+        # Lookahead split keeps both URLs; whitespace-only piece is dropped.
+        result = split_inline_urls(line)
+        assert "https://a.com/x   " in result
+        assert "https://b.com/y" in result
 
 
 # ─── dedupe_preserve_order() ────────────────────────────────────

@@ -33,9 +33,11 @@ from telegram.ext import (
 from bot.auth import auth
 from bot.classifier import (
     LinkKind,
+    classify,
     classify_batch,
     dedupe_preserve_order,
     split_by_kind,
+    split_inline_urls,
 )
 from bot.file_parser import (
     FileTooLargeError,
@@ -196,13 +198,25 @@ async def collect_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     try:
         new_lines = parse_uploaded_file(filename, bytes(data))
     except FileTooLargeError as e:
+        # File-too-large is recoverable: keep the wizard open so the user
+        # can split the file and re-upload.
         await update.message.reply_text(f"❌ {e}")
         return State.COLLECT
     except UnsupportedFileError as e:
+        # JSON syntax / shape errors are usually a copy-paste mistake on the
+        # user's side; cancel the wizard so they don't accumulate stale buffer
+        # state and have to re-/start anyway. Releases the lock too just in
+        # case it was held (defensive — should not be at this point).
+        lock = context.bot_data.get("lock")
+        if lock is not None and update.effective_user is not None:
+            lock.release(update.effective_user.id)
+        context.user_data.clear()
         await update.message.reply_text(
-            f"❌ Failed to parse `{filename}`: {e}", parse_mode=ParseMode.MARKDOWN
+            f"❌ JSON error in `{filename}`: {e}\n\n"
+            f"Wizard cancelled. Fix the file and /start again.",
+            parse_mode=ParseMode.MARKDOWN,
         )
-        return State.COLLECT
+        return ConversationHandler.END
 
     if not new_lines:
         await update.message.reply_text(f"⚠ `{filename}` is empty.", parse_mode=ParseMode.MARKDOWN)
@@ -220,26 +234,52 @@ async def _extend_buffer(
     """Append new_lines to the buffer, respecting max-link cap, and reply.
 
     Shared by both text-paste and file-upload paths.
+
+    Lines are first split on inline URL boundaries (so concatenated-without-
+    separator pastes like ``a/440/https://...570/`` become two entries), then
+    each piece is classified. Valid URLs are deduplicated against
+    ``user_data["seen_urls"]`` so duplicate paste attempts get a live warning
+    instead of silently bloating the buffer until /done.
+
+    Invalid lines are appended as-is — no dedupe — so the user can still see
+    them at preview time and learn what was wrong.
     """
     buffer: list[str] = context.user_data.setdefault("buffer", [])
+    seen_urls: set[str] = context.user_data.setdefault("seen_urls", set())
     config = context.bot_data["config"]
-    available = config.max_links_per_dispatch - len(buffer)
 
+    fresh: list[str] = []
+    duplicates = 0
+    for line in new_lines:
+        for piece in split_inline_urls(line):
+            link = classify(piece)
+            if link.kind == LinkKind.INVALID:
+                fresh.append(piece)
+                continue
+            if link.url in seen_urls:
+                duplicates += 1
+                continue
+            seen_urls.add(link.url)
+            fresh.append(piece)
+
+    available = config.max_links_per_dispatch - len(buffer)
     if available <= 0:
         await update.message.reply_text(
             f"Already at limit ({config.max_links_per_dispatch}). Send /done or /cancel."
         )
         return
 
-    accepted = new_lines[:available]
-    overflow = len(new_lines) - len(accepted)
+    accepted = fresh[:available]
+    overflow = len(fresh) - len(accepted)
     buffer.extend(accepted)
 
-    msg = format_collect_progress(len(buffer), config.max_links_per_dispatch)
+    msg_parts = [format_collect_progress(len(buffer), config.max_links_per_dispatch)]
+    if duplicates > 0:
+        msg_parts.append(f"⚠ {duplicates} duplicate link(s) skipped (already in buffer).")
     if overflow > 0:
-        msg += f"\n\n⚠ {overflow} line(s) dropped (over limit)."
+        msg_parts.append(f"⚠ {overflow} line(s) dropped (over limit).")
 
-    await update.message.reply_text(msg)
+    await update.message.reply_text("\n\n".join(msg_parts))
 
 
 @auth
@@ -248,6 +288,9 @@ async def reset_buffer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if not update.message:
         return State.COLLECT
     context.user_data["buffer"] = []
+    # Drop the seen-URL set too so previously pasted URLs can be re-added
+    # after a reset (otherwise live dedupe would silently swallow them).
+    context.user_data["seen_urls"] = set()
     await update.message.reply_text("📥 Buffer cleared. Paste new links or /cancel to abort.")
     return State.COLLECT
 
@@ -301,6 +344,10 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     raw_text = "\n".join(buffer)
     classified = classify_batch(raw_text)
     deduped = dedupe_preserve_order(classified)
+    # Live-dedupe in _extend_buffer should already prevent duplicates from
+    # entering the buffer; this count covers the /q quick-add path and any
+    # dupes introduced by manual buffer manipulation.
+    duplicate_count = len(classified) - len(deduped)
     steam, itch, invalid = split_by_kind(deduped)
 
     # Filter by mode
@@ -326,7 +373,14 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     }
 
     has_valid = bool(steam or itch)
-    preview_text = format_preview(steam, itch, invalid, mode, inline=has_valid)
+    preview_text = format_preview(
+        steam,
+        itch,
+        invalid,
+        mode,
+        duplicate_count=duplicate_count,
+        inline=has_valid,
+    )
 
     if not has_valid:
         await update.message.reply_text(preview_text, parse_mode=ParseMode.MARKDOWN)

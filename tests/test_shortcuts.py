@@ -79,3 +79,35 @@ class TestQuickDispatch:
         result = await quick_dispatch(update, ctx)
         assert result is None
         assert not app.bot_data["pending_quick"]
+
+    async def test_duplicate_count_in_preview(self, app: Application) -> None:
+        """When user passes the same URL twice, preview shows duplicates: 1."""
+        update = make_update("/q")
+        ctx = _quick_ctx(
+            app,
+            [
+                "https://store.steampowered.com/app/440/",
+                "https://store.steampowered.com/app/440/",  # dup
+            ],
+        )
+
+        await quick_dispatch(update, ctx)
+
+        text = update.message.reply_text.call_args.args[0]
+        assert "Duplicates (skipped): *1*" in text
+
+    async def test_concatenated_urls_split_into_pending(self, app: Application) -> None:
+        """Single arg containing two concat URLs should yield two Steam links."""
+        update = make_update("/q")
+        ctx = _quick_ctx(
+            app,
+            [
+                "https://store.steampowered.com/app/4343200/Pets/"
+                "https://store.steampowered.com/app/1170880/Hollow/"
+            ],
+        )
+
+        await quick_dispatch(update, ctx)
+
+        pending = app.bot_data["pending_quick"][42]
+        assert len(pending["steam"]) == 2

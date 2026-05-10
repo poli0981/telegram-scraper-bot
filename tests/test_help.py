@@ -17,7 +17,17 @@ class TestHelp:
         update.message.reply_text.assert_called_once()
         text = update.message.reply_text.call_args.args[0]
         # Sanity: every documented command should appear
-        for cmd in ("/start", "/q", "/retry", "/status", "/version", "/cancel", "/reset", "/show"):
+        for cmd in (
+            "/start",
+            "/q",
+            "/retry",
+            "/status",
+            "/version",
+            "/whoami",
+            "/cancel",
+            "/reset",
+            "/show",
+        ):
             assert cmd in text
 
     async def test_help_rejects_unauthorized_user(self, app: Application) -> None:

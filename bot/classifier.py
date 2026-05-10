@@ -43,6 +43,15 @@ _ITCH_RE = re.compile(
 # Bare appid (e.g. "440" → Team Fortress 2)
 _BARE_APPID_RE = re.compile(r"^\d{1,8}$")
 
+# Lookahead to split a single line on URL boundaries. Handles the common
+# paste-without-separator case:
+#   "https://store.../app/440/https://store.../app/570/"
+#       → ["https://store.../app/440/", "https://store.../app/570/"]
+# Non-URL prefixes (e.g. "see: https://...") are kept as their own piece and
+# typically classified as INVALID — preserving them surfaces the prefix to the
+# user instead of silently dropping it.
+_URL_SPLIT_RE = re.compile(r"(?=https?://)", re.IGNORECASE)
+
 
 def classify(line: str) -> ClassifiedLink:
     """Classify one line of user input.
@@ -93,9 +102,30 @@ def classify(line: str) -> ClassifiedLink:
     return ClassifiedLink(LinkKind.INVALID, raw, line)
 
 
+def split_inline_urls(line: str) -> list[str]:
+    """Split a single line on URL boundaries.
+
+    Users sometimes paste multiple URLs concatenated without a separator, e.g.
+    ``https://a.com/x/https://b.com/y``. The Steam URL regex's greedy path
+    component would otherwise swallow the second URL. Splitting on a lookahead
+    for ``https?://`` recovers each URL individually.
+
+    Lines without an embedded ``http(s)://`` pass through unchanged (single-
+    element list). Empty pieces are dropped.
+    """
+    parts = [p for p in _URL_SPLIT_RE.split(line) if p.strip()]
+    return parts if parts else [line]
+
+
 def classify_batch(text: str) -> list[ClassifiedLink]:
-    """Classify multi-line input. Empty lines are filtered out before classify()."""
-    return [classify(line) for line in text.splitlines() if line.strip()]
+    """Classify multi-line input. Empty lines and inline-concatenated URLs split."""
+    out: list[ClassifiedLink] = []
+    for raw_line in text.splitlines():
+        if not raw_line.strip():
+            continue
+        for piece in split_inline_urls(raw_line):
+            out.append(classify(piece))
+    return out
 
 
 def dedupe_preserve_order(links: list[ClassifiedLink]) -> list[ClassifiedLink]:

@@ -7,11 +7,31 @@ constructs without error, including the PicklePersistence wiring added in 3c.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telegram import User
 
 from bot.config import Config
 from bot.main import build_application
+
+
+def _stub_bot_methods(app) -> AsyncMock:
+    """Replace network-touching ExtBot methods with AsyncMock.
+
+    Returns the get_me mock so tests can assert on it. ExtBot is frozen, so
+    we go through ``object.__setattr__`` to inject.
+    """
+    fake_me = MagicMock(spec=User)
+    fake_me.username = "test_bot"
+    fake_me.id = 777
+    fake_me.first_name = "Test"
+    get_me_mock = AsyncMock(return_value=fake_me)
+    object.__setattr__(app.bot, "get_me", get_me_mock)
+    object.__setattr__(app.bot, "set_my_commands", AsyncMock())
+    object.__setattr__(app.bot, "set_my_short_description", AsyncMock())
+    object.__setattr__(app.bot, "set_my_description", AsyncMock())
+    return get_me_mock
 
 
 @pytest.fixture
@@ -73,6 +93,7 @@ class TestBuildApplication:
         from bot.gates import ConcurrencyLock, RateLimit
 
         app = build_application(config)
+        _stub_bot_methods(app)
         # Simulate PTB's lifecycle: post_init runs after persistence load.
         # We invoke it directly to verify the closure populates bot_data.
         post_init = app.post_init
@@ -84,8 +105,39 @@ class TestBuildApplication:
             assert isinstance(app.bot_data["dispatcher"], Dispatcher)
             assert isinstance(app.bot_data["lock"], ConcurrencyLock)
             assert isinstance(app.bot_data["rate_limit"], RateLimit)
+            # Phase-6: pending_quick + last_dispatch dicts exist
+            assert app.bot_data["pending_quick"] == {}
+            assert app.bot_data["last_dispatch"] == {}
         finally:
             # Clean up the httpx client we just created
             client = app.bot_data.get("http_client")
             if client is not None:
                 await client.aclose()
+
+    async def test_post_init_calls_get_me(self, config: Config) -> None:
+        """Token sanity check: post_init must hit /getMe so bad tokens fail loud."""
+        app = build_application(config)
+        get_me_mock = _stub_bot_methods(app)
+
+        await app.post_init(app)
+
+        try:
+            get_me_mock.assert_awaited_once()
+        finally:
+            client = app.bot_data.get("http_client")
+            if client is not None:
+                await client.aclose()
+
+    async def test_post_init_raises_when_get_me_fails(self, config: Config) -> None:
+        """Bad BOT_TOKEN: getMe raises, post_init must propagate (don't run zombie bot)."""
+        app = build_application(config)
+        _stub_bot_methods(app)
+        # Override get_me to fail
+        object.__setattr__(app.bot, "get_me", AsyncMock(side_effect=RuntimeError("Unauthorized")))
+
+        with pytest.raises(RuntimeError, match="Unauthorized"):
+            await app.post_init(app)
+
+        client = app.bot_data.get("http_client")
+        if client is not None:
+            await client.aclose()

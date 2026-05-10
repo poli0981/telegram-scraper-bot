@@ -35,6 +35,7 @@ _HELP_TEXT = (
     "*Diagnostics*\n"
     "• /status — quota + lock state\n"
     "• /version — bot metadata (git SHA, Python, workflow ref)\n"
+    "• /whoami — show your Telegram user ID + auth status\n"
     "• /help — this message\n"
     "\n"
     "Flow: `/start → /steam|/itch|/mixed → paste links → /done → /yes`"
